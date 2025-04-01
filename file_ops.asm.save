@@ -1,0 +1,468 @@
+;File Operations Module for Library Management System
+
+;Function to Save library data to file
+save_to_file:
+    ; Display framed title
+    mov eax, save_title
+    call display_framed_title
+
+    ; Get filename
+    mov eax, COLOR_CYAN
+    mov ebx, filename_prompt
+    call print_colored
+
+    mov ecx, filename_buffer
+    mov edx, 31         ; Max 30 chars + null
+    call get_string
+
+    ; Create or truncate file
+    mov eax, 8          ; sys_creat
+    mov ebx, filename_buffer
+    mov ecx, 0644       ; File permissions (rw-r--r--)
+    int 80h
+
+    ; Check for error
+    test eax, eax
+    js .file_error
+
+    ; Store file descriptor
+    mov [file_descriptor], eax
+    
+    ; Write header line
+    mov eax, 4          ; sys_write
+    mov ebx, [file_descriptor]
+    mov ecx, file_header
+    mov edx, [file_header_len]
+    int 80h
+    
+    ; Check if there are any books
+    mov eax, [book_count]
+    test eax, eax
+    jz .no_books
+    
+    ; Loop through all books and write them to file
+    mov ecx, 0          ; Book index counter
+    
+.write_loop:
+    ; Load book at index ECX
+    push ecx
+    mov [search_result], ecx
+    call load_book
+    
+    ; Format the book data for file writing
+    call format_book_for_file
+    
+    ; Write the formatted data
+    mov eax, 4          ; sys_write
+    mov ebx, [file_descriptor]
+    mov ecx, file_buffer
+    mov edx, [file_buffer_len]
+    int 80h
+    
+    ; Move to next book
+    pop ecx
+    inc ecx
+    cmp ecx, [book_count]
+    jl .write_loop
+    
+.no_books:
+    ; Close the file
+    mov eax, 6          ; sys_close
+    mov ebx, [file_descriptor]
+    int 80h
+    
+    ; Display success message
+    mov eax, COLOR_GREEN
+    mov ebx, save_success
+    call print_colored
+    
+    jmp .finish
+    
+.file_error:
+    ; Display error message
+    mov eax, COLOR_RED
+    mov ebx, file_error_msg
+    call print_colored
+    
+.finish:
+    ; Wait for user to press Enter
+    mov eax, COLOR_WHITE
+    mov ebx, press_any_key
+    call print_colored
+    call wait_for_enter
+    
+    jmp main_loop
+
+; Function: Load library data from file
+load_from_file:
+    ; Display framed title
+    mov eax, load_title
+    call display_framed_title
+    
+    ; Get filename
+    mov eax, COLOR_CYAN
+    mov ebx, filename_prompt
+    call print_colored
+    
+    mov ecx, filename_buffer
+    mov edx, 31         ; Max 30 chars + null
+    call get_string
+    
+    ; Open file for reading
+    mov eax, 5          ; sys_open
+    mov ebx, filename_buffer
+    mov ecx, 0          ; O_RDONLY
+    int 80h
+    
+    ; Check for error
+    test eax, eax
+    js .file_error
+    
+    ; Store file descriptor
+    mov [file_descriptor], eax
+    
+    ; Reset book count
+    mov dword [book_count], 0
+    
+    ; Read header line and discard
+    call read_line
+    
+    ; Read and process each line
+.read_loop:
+    ; Read a line from the file
+    call read_line
+    
+    ; Check if we've reached EOF
+    cmp eax, 0
+    jle .read_done
+    
+    ; Parse the line and add book to database
+    call parse_book_line
+    
+    ; Continue reading
+    jmp .read_loop
+    
+.read_done:
+    ; Close the file
+    mov eax, 6          ; sys_close
+    mov ebx, [file_descriptor]
+    int 80h
+    
+    ; Update statistics
+    call update_statistics
+    
+    ; Display success message
+    mov eax, COLOR_GREEN
+    mov ebx, load_success
+    call print_colored
+    
+    jmp .finish
+    
+.file_error:
+    ; Display error message
+    mov eax, COLOR_RED
+    mov ebx, file_error_msg
+    call print_colored
+    
+.finish:
+    ; Wait for user to press Enter
+    mov eax, COLOR_WHITE
+    mov ebx, press_any_key
+    call print_colored
+    call wait_for_enter
+    
+    jmp main_loop
+
+; Function: Format book data for file writing
+; Formats current book in temp_* variables for file output
+format_book_for_file:
+    mov edi, file_buffer
+
+    ; Add book ID
+    mov esi, temp_book_id
+    call append_string
+    
+    ; Add delimiter
+    mov byte [edi], ','
+    inc edi
+    
+    ; Add book title
+    mov esi, temp_book_title
+    call append_string
+    
+    ; Add delimiter
+    mov byte [edi], ','
+    inc edi
+    
+    ; Add book author
+    mov esi, temp_book_author
+    call append_string
+    
+    ; Add delimiter
+    mov byte [edi], ','
+    inc edi
+    
+    ; Add quantity
+    mov eax, [temp_book_quantity]
+    call append_int
+    
+    ; Add delimiter
+    mov byte [edi], ','
+    inc edi
+    
+    ; Add issued count
+    mov eax, [temp_book_issued]
+    call append_int
+    
+    ; Add delimiter
+    mov byte [edi], ','
+    inc edi
+    
+    ; Add category
+    mov eax, [temp_book_category]
+    call append_int
+    
+    ; Add newline
+    mov byte [edi], LF
+    inc edi
+    
+    ; Calculate length
+    mov eax, edi
+    sub eax, file_buffer
+    mov [file_buffer_len], eax
+    
+    ret
+
+; Function: Append string to buffer
+; Input: ESI = source string, EDI = destination buffer
+append_string:
+    push eax
+    
+.copy_loop:
+    lodsb               ; Load byte from ESI into AL and increment ESI
+    cmp al, NULL
+    je .done
+    stosb               ; Store AL to EDI and increment EDI
+    jmp .copy_loop
+    
+.done:
+    pop eax
+    ret
+
+; Function: Append integer to buffer
+; Input: EAX = integer, EDI = destination buffer
+append_int:
+    push eax
+    push ebx
+    push ecx
+    push edx
+    
+    ; Special case for 0
+    test eax, eax
+    jnz .convert
+    
+    mov byte [edi], '0'
+    inc edi
+    jmp .done
+    
+.convert:
+    ; First convert to string in reverse order
+    mov ebx, 10         ; Divisor
+    mov ecx, edi        ; Save start position
+    
+.convert_loop:
+    xor edx, edx
+    div ebx             ; EAX / 10, quotient in EAX, remainder in EDX
+    add dl, '0'         ; Convert to ASCII
+    
+    mov [edi], dl       ; Store digit
+    inc edi
+    
+    test eax, eax
+    jnz .convert_loop
+    
+    ; Now reverse the string
+    mov ebx, edi
+    dec ebx             ; End of string
+    
+.reverse_loop:
+    cmp ecx, ebx
+    jge .reverse_done
+    
+    mov al, [ecx]
+    mov dl, [ebx]
+    mov [ecx], dl
+    mov [ebx], al
+    
+    inc ecx
+    dec ebx
+    jmp .reverse_loop
+    
+.reverse_done:
+
+.done:
+    pop edx
+    pop ecx
+    pop ebx
+    pop eax
+    ret
+
+; Function: Read a line from the file
+; Output: EAX = bytes read (0 for EOF, -1 for error)
+read_line:
+    push ebx
+    push ecx
+    push edx
+    
+    mov edi, file_buffer
+    xor esi, esi        ; Bytes read counter
+    
+.read_char:
+    ; Read one character
+    mov eax, 3          ; sys_read
+    mov ebx, [file_descriptor]
+    lea ecx, [edi+esi]  ; Current position in buffer
+    mov edx, 1          ; Read 1 byte
+    int 80h
+    
+    ; Check for error or EOF
+    test eax, eax
+    jle .done
+    
+    ; Check if it's a newline
+    mov al, [edi+esi]
+    cmp al, LF
+    je .line_done
+    
+    ; Add to buffer
+    inc esi
+    
+    ; Check if buffer is full (limit to 255 chars)
+    cmp esi, 255
+    jl .read_char
+    
+.line_done:
+    ; Replace newline with null terminator
+    mov byte [edi+esi], NULL
+    
+.done:
+    ; Set return value (bytes read)
+    mov eax, esi
+    
+    ; Store buffer length
+    mov [file_buffer_len], esi
+    
+    pop edx
+    pop ecx
+    pop ebx
+    ret
+
+; Function: Parse a line of book data and add to database
+parse_book_line:
+    push ecx
+    push edx
+    
+    ; Line is in file_buffer, parse CSV format
+    
+    ; Parse book ID
+    mov esi, file_buffer
+    mov edi, temp_book_id
+    call parse_csv_field
+    
+    ; Parse book title
+    mov edi, temp_book_title
+    call parse_csv_field
+    
+    ; Parse book author
+    mov edi, temp_book_author
+    call parse_csv_field
+    
+    ; Parse quantity
+    call parse_csv_field_to_int
+    mov [temp_book_quantity], eax
+    
+    ; Parse issued count
+    call parse_csv_field_to_int
+    mov [temp_book_issued], eax
+    
+    ; Parse category
+    call parse_csv_field_to_int
+    mov [temp_book_category], eax
+    
+    ; Add book to database
+    call store_book
+    
+    pop edx
+    pop ecx
+    ret
+
+; Function: Parse a CSV field
+; Input: ESI = source buffer, EDI = destination buffer
+; Output: ESI updated to point to next field
+parse_csv_field:
+    push eax
+    
+.copy_loop:
+    lodsb               ; Load byte from ESI into AL and increment ESI
+    
+    ; Check for end of field or line
+    cmp al, ','
+    je .done
+    cmp al, NULL
+    je .done
+    
+    ; Copy character
+    stosb
+    jmp .copy_loop
+    
+.done:
+    ; Null-terminate the field
+    mov byte [edi], NULL
+    
+    pop eax
+    ret
+
+; Function: Parse a CSV field as integer
+; Input: ESI = source buffer
+; Output: EAX = integer value, ESI updated to point to next field
+parse_csv_field_to_int:
+    push ebx
+    push ecx
+    push edx
+    
+    xor eax, eax        ; Result
+    
+.convert_loop:
+    mov bl, [esi]
+    
+    ; Check for end of field or line
+    cmp bl, ','
+    je .done
+    cmp bl, NULL
+    je .done
+    
+    ; Convert digit
+    sub bl, '0'
+    
+    ; Multiply result by 10
+    mov ecx, 10
+    mul ecx
+    
+    ; Add digit
+    add eax, ebx
+    
+    ; Move to next character
+    inc esi
+    jmp .convert_loop
+    
+.done:
+    ; Skip comma
+    cmp byte [esi], ','
+    jne .exit
+    inc esi
+    
+.exit:
+    pop edx
+    pop ecx
+    pop ebx
+    ret
